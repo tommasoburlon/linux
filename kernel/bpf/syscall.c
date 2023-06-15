@@ -2601,6 +2601,12 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	prog->aux->sleepable = attr->prog_flags & BPF_F_SLEEPABLE;
 	prog->aux->xdp_has_frags = attr->prog_flags & BPF_F_XDP_HAS_FRAGS;
 
+	if(!capable(CAP_BPF) && !capable(CAP_SYS_ADMIN) && capable(CAP_UNTRUSTED_BPF)) {
+		// list of bpf confidentially secure helpers
+		set_bit(BPF_FUNC_map_lookup_elem, prog->aux->blocked_helpers);
+		set_bit(BPF_FUNC_bpf_arg_read, prog->aux->blocked_helpers);
+	}
+
 	err = security_bpf_prog_alloc(prog->aux);
 	if (err)
 		goto free_prog;

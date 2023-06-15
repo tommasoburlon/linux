@@ -8882,6 +8882,11 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		return -EINVAL;
 	}
 
+	if(test_bit(func_id, env->prog->aux->blocked_helpers)) {
+		verbose(env, "helper call %s#%d is blocked for this program\n", func_id_name(func_id), func_id);
+		return -EINVAL;
+	}
+
 	if (fn->allowed && !fn->allowed(env->prog)) {
 		verbose(env, "helper call is not allowed in probe\n");
 		return -EINVAL;
@@ -17684,6 +17689,26 @@ static int do_misc_fixups(struct bpf_verifier_env *env)
 			env->prog = prog = new_prog;
 			insn      = new_prog->insnsi + i + delta;
 			continue;
+		}
+
+		if (insn->imm == BPF_FUNC_bpf_arg_read) {
+			struct bpf_insn ld_addrs[2] = {
+				BPF_LD_IMM64(BPF_REG_5, (long)prog->aux),
+			};
+
+			insn_buf[0] = ld_addrs[0];
+			insn_buf[1] = ld_addrs[1];
+			insn_buf[2] = *insn;
+			cnt = 3;
+
+			new_prog = bpf_patch_insn_data(env, i + delta, insn_buf, cnt);
+			if(!new_prog)
+				return -ENOMEM;
+
+			delta += cnt - 1;
+			env->prog = prog = new_prog;
+			insn = new_prog->insnsi + i + delta;
+			goto patch_call_imm;
 		}
 
 		if (insn->imm == BPF_FUNC_timer_set_callback) {

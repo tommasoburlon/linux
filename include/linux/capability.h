@@ -199,7 +199,7 @@ static inline bool perfmon_capable(void)
 
 static inline bool bpf_capable(void)
 {
-	return capable(CAP_BPF) || capable(CAP_SYS_ADMIN);
+	return capable(CAP_UNTRUSTED_BPF) || capable(CAP_BPF) || capable(CAP_SYS_ADMIN);
 }
 
 static inline bool checkpoint_restore_ns_capable(struct user_namespace *ns)

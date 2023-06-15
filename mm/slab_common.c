@@ -1446,6 +1446,23 @@ size_t ksize(const void *objp)
 }
 EXPORT_SYMBOL(ksize);
 
+size_t remain_ksize(const void *objp)
+{
+	struct slab *slab;
+	struct kmem_obj_info kp = { };
+
+	if(!virt_addr_valid(objp))
+		return 0;
+
+	slab = virt_to_slab(objp);
+	if(!slab)
+		return 0;
+
+	kmem_obj_info(&kp, (void*)objp, slab);
+	return ksize(objp) - ((char*)objp - (char*)kp.kp_objp) - kp.kp_data_offset;
+}
+EXPORT_SYMBOL(remain_ksize);
+
 /* Tracepoints definitions. */
 EXPORT_TRACEPOINT_SYMBOL(kmalloc);
 EXPORT_TRACEPOINT_SYMBOL(kmem_cache_alloc);

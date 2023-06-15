@@ -224,6 +224,7 @@ size_t __ksize(const void *objp);
  * originally allocated size via the __alloc_size attribute.
  */
 size_t ksize(const void *objp);
+size_t remain_ksize(const void *objp);
 
 #ifdef CONFIG_PRINTK
 bool kmem_valid_obj(void *object);

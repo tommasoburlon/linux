@@ -7523,6 +7523,171 @@ static struct btf *btf_get_module_btf(const struct module *module)
 	return btf;
 }
 
+int btf_safe_copy(const struct btf *btf, const struct btf_type *type, void *dst, int dst_size, void *src, unsigned int nelems){
+        int ret_size = 0;
+
+        type = btf_resolve_size(btf, type, &ret_size);
+        ret_size = min(ret_size * nelems, (unsigned int)dst_size);
+        memcpy(dst, src, ret_size);
+        return ret_size;
+}
+
+int btf_traverse(const struct btf *btf, char *path, const struct btf_type **type_itr, void **ptr_res){
+        char *path_itr = path, *next_hop;
+        const char *member_name;
+        int ret, kind, len, i, size, type_id, nelems;
+        long idx;
+        const struct btf_member *members;
+        const struct btf_array *array;
+        void *ptr = *ptr_res;
+
+        if(path_itr == NULL || path_itr[0] == '\0')
+                return 1;
+
+        next_hop = strsep(&path_itr, "/");
+        while(next_hop != NULL && next_hop[0] != '\0') {
+                kind = btf_kind(*type_itr);
+
+                switch(kind) {
+                case BTF_KIND_STRUCT:
+                case BTF_KIND_UNION:
+                        members = btf_type_member(*type_itr);
+                        len = btf_vlen(*type_itr);
+                        ret = -EINVAL;
+                        for(i = 0; i < len; i++) {
+                                member_name = btf_name_by_offset(btf, members[i].name_off);
+                                if(!strcmp(next_hop, member_name)) {
+                                        ret = i;
+                                        break;
+                                }
+                        }
+                        if(ret < 0)
+                                return ret;
+                        (*type_itr) = btf_type_skip_modifiers(btf, members[ret].type, NULL);
+                        ptr = ptr + (BTF_MEMBER_BIT_OFFSET(members[ret].offset) >> 3);
+                        nelems = 1;
+                        break;
+                case BTF_KIND_PTR:
+                case BTF_KIND_ARRAY:
+                        if(ptr == NULL)
+                                return -EINVAL;
+
+                        ret = kstrtol(next_hop, 10, &idx);
+                        if(ret < 0)
+                                idx = 0;
+
+                        if(kind == BTF_KIND_ARRAY) {
+                                array = btf_array(*type_itr);
+                                nelems = array->nelems;
+                                (*type_itr) = btf_type_skip_modifiers(btf, array->type, &type_id);
+                        } else {
+                                nelems = 1;
+                                ptr = *(void**)ptr;
+                                (*type_itr) = btf_type_skip_modifiers(btf, (*type_itr)->type, &type_id);
+                                btf_type_id_size(btf, &type_id, &size);
+                                if(btf_is_int(*type_itr) && size == 1)
+                                        nelems = strlen((const char*)ptr) + 1;
+                        }
+                        btf_type_id_size(btf, &type_id, &size);
+                        nelems = max((unsigned long)nelems, (unsigned long)(remain_ksize(ptr) / size));
+
+                        if(idx < 0 || idx >= nelems)
+                                return -EINVAL;
+                        ptr = ptr + idx * size;
+                        nelems -= idx;
+                        break;
+                default:
+                        return -EINVAL;
+                }
+                next_hop = strsep(&path_itr, "/");
+        }
+
+        *ptr_res = ptr;
+        return nelems;
+}
+
+BPF_CALL_5(bpf_arg_read, struct pt_regs *, regs, const char *, path, void *, dst, u32, size, struct bpf_prog_aux *, aux)
+{
+	struct btf *btf;
+	const struct btf_type *func_proto_btf, *arg_type;
+	struct btf_param *params;
+	int num_params, ret;
+	s32 func_id;
+	unsigned long arg_value, idx;
+	char *next_hop, path_cpy[255], *path_ptr;
+	unsigned char *arg_ptr;
+
+        if (!aux->func_proto_unreliable && aux->attach_func_proto != NULL) {
+                btf = aux->attach_btf;
+                func_proto_btf = aux->attach_func_proto;
+        } else {
+		unsigned long ins_ptr = instruction_pointer(regs);
+		struct module *mod;
+		const struct btf_type *func_btf;
+		char func_name[KSYM_SYMBOL_LEN];
+
+		mod = __module_address(ins_ptr);
+                btf = btf_get_module_btf(mod);
+
+		if(btf == NULL || IS_ERR(btf)){
+			return -EINVAL;
+		}
+
+                ret = sprint_symbol_no_offset(&func_name[0], ins_ptr);
+		if(ret < 0)
+			return -EINVAL;
+		if(mod != NULL){
+			char *func_ptr = &func_name[0];
+			strsep(&func_ptr, " ");
+		}
+		func_id = btf_find_by_name_kind(btf, func_name, BTF_KIND_FUNC);
+
+                if(func_id < 0)
+                        return -EINVAL;
+
+                func_btf = btf_type_by_id(btf, func_id);
+                func_proto_btf = btf_type_by_id(btf, func_btf->type);
+
+                aux->attach_btf = btf;
+                aux->attach_func_proto = func_proto_btf;
+                aux->func_proto_unreliable = false;
+        }
+
+        params = btf_params(func_proto_btf);
+        num_params = btf_type_vlen(func_proto_btf);
+
+        strncpy(path_cpy, path, 255);
+        path_cpy[254] = '\0';
+        path_ptr = (char*) path_cpy;
+
+        next_hop = strsep(&path_ptr, "/");
+        if(next_hop == NULL || next_hop[0] == '\0')
+                return -EINVAL;
+
+        ret = kstrtol(next_hop, 10, &idx);
+        if(ret < 0 || idx >= num_params)
+                return -EINVAL;
+
+        arg_type = btf_type_skip_modifiers(btf, params[idx].type, NULL);
+        arg_value = regs_get_kernel_argument(regs, idx);
+
+        arg_ptr = (unsigned char*)&arg_value;
+        ret = btf_traverse(btf, path_ptr, &arg_type, (void**)&arg_ptr);
+        if(ret < 0)
+                return ret;
+        return btf_safe_copy(btf, arg_type, dst, size, arg_ptr, ret);
+}
+
+const struct bpf_func_proto bpf_arg_read_proto = {
+        .func = bpf_arg_read,
+        .gpl_only = false,
+        .ret_type = RET_INTEGER,
+        .arg1_type = ARG_PTR_TO_CTX,
+        .arg2_type = ARG_PTR_TO_CONST_STR,
+        .arg3_type = ARG_PTR_TO_UNINIT_MEM,
+        .arg4_type = ARG_CONST_SIZE,
+};
+
 BPF_CALL_4(bpf_btf_find_by_name_kind, char *, name, int, name_sz, u32, kind, int, flags)
 {
 	struct btf *btf = NULL;

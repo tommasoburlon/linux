@@ -1703,6 +1703,8 @@ bpf_base_func_proto(enum bpf_func_id func_id)
 		return &bpf_strtol_proto;
 	case BPF_FUNC_strtoul:
 		return &bpf_strtoul_proto;
+	case BPF_FUNC_bpf_arg_read:
+		return &bpf_arg_read_proto;
 	default:
 		break;
 	}
